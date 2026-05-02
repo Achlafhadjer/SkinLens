@@ -1,0 +1,139 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=${DB_NAME}
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+
+  consul:
+    image: consul:1.15
+    ports:
+      - "8500:8500"
+    command: agent -server -bootstrap-expect=1 -ui -client=0.0.0.0
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  traefik:
+    image: traefik:v2.10
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "80:80"
+      - "8080:8080" # Dashboard
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+
+  auth-service:
+    build: ./auth_service
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - ./auth_service:/app
+    ports:
+      - "${AUTH_SERVICE_PORT}:8000"
+    env_file:
+      - .env
+    depends_on:
+      - db
+      - consul
+      - rabbitmq
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.auth.rule=PathPrefix(`/api/auth`)"
+      - "traefik.http.services.auth.loadbalancer.server.port=8000"
+
+  prediction-service:
+    build: ./prediction_service
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - ./prediction_service:/app
+      - ./media:/app/media
+    ports:
+      - "${PREDICTION_SERVICE_PORT}:8000"
+    env_file:
+      - .env
+    depends_on:
+      - db
+      - consul
+      - rabbitmq
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.prediction.rule=PathPrefix(`/api/predictions`)"
+      - "traefik.http.services.prediction.loadbalancer.server.port=8000"
+
+  history-service:
+    build: ./history_service
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - ./history_service:/app
+      - ./media:/app/media
+    ports:
+      - "${HISTORY_SERVICE_PORT}:8000"
+    env_file:
+      - .env
+    depends_on:
+      - db
+      - consul
+      - rabbitmq
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.history.rule=PathPrefix(`/api/history`)"
+      - "traefik.http.services.history.loadbalancer.server.port=8000"
+
+  worker:
+    build: ./history_service
+    command: python manage.py run_consumer
+    volumes:
+      - ./history_service:/app
+      - ./media:/app/media
+    env_file:
+      - .env
+    depends_on:
+      - db
+      - consul
+      - rabbitmq
+      - history-service
+
+  deeplearning-service:
+    build: ./Deeplearning
+    volumes:
+      - ./Deeplearning:/app
+    ports:
+      - "${DL_SERVICE_PORT}:8000"
+    env_file:
+      - .env
+    depends_on:
+      - consul
+      - rabbitmq
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dl.rule=PathPrefix(`/predict`)"
+      - "traefik.http.services.dl.loadbalancer.server.port=8000"
+
+  frontend:
+    image: nginx:alpine
+    volumes:
+      - ./frond-end:/usr/share/nginx/html
+    depends_on:
+      - auth-service
+      - prediction-service
+      - history-service
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=PathPrefix(`/`)"
+      - "traefik.http.services.frontend.loadbalancer.server.port=80"
+
+volumes:
+  postgres_data:
+  media:
